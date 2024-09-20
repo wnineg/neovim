@@ -1004,42 +1004,53 @@ static void print_spaces(TUIData *tui, int width)
   }
 }
 
-/// Move cursor to the position given by `row` and `col` and print the char in `cell`.
-/// Allows grid and host terminal to assume different widths of ambiguous-width chars.
+/// Print the chars of `count` cells at `row` and `col` of the TUI. Starting from the cell `col`
+/// offset from `row_cell`.
 ///
-/// @param is_doublewidth  whether the char is double-width on the grid.
-///                        If true and the char is ambiguous-width, clear two cells.
-static void print_cell_at_pos(TUIData *tui, int row, int col, UCell *cell, bool is_doublewidth)
+/// @param tui
+/// @param row_cell the very first cell of the row.
+/// @param row the row index of the screen.
+/// @param col the col index of the screen, as well as the offset from `row_cell`.
+/// @param count number of cells to be printed
+static void print_cells_at_row(TUIData *tui, UCell *row_cell, int row, int col, int count)
 {
   UGrid *grid = &tui->grid;
 
-  if (grid->row == -1 && cell->data == NUL) {
-    // If cursor needs repositioning and there is nothing to print, don't move cursor.
-    return;
-  }
-
   cursor_goto(tui, row, col);
 
-  char buf[MAX_SCHAR_SIZE];
-  schar_get(buf, cell->data);
-  int c = utf_ptr2char(buf);
-  bool is_ambiwidth = utf_ambiguous_width(buf);
-  if (is_doublewidth && (is_ambiwidth || utf_char2cells(c) == 1)) {
-    // If the server used setcellwidths() to treat a single-width char as double-width,
-    // it needs to be treated like an ambiguous-width char.
-    is_ambiwidth = true;
-    // Clear the two screen cells.
-    // If the char is single-width in host terminal it won't change the second cell.
-    update_attrs(tui, cell->attr);
-    print_spaces(tui, 2);
-    cursor_goto(tui, row, col);
-  }
+  for (int i = 0; i < count; i++) {
+    UCell *cell = &row_cell[col + i];
 
-  print_cell(tui, buf, cell->attr);
+    if (grid->row == -1) {
+      // If cursor needs repositioning, wait until there is data to print.
+      if (cell->data == NUL) {
+        continue;
+      }
+      cursor_goto(tui, row, col + i);
+    }
 
-  if (is_ambiwidth) {
-    // Force repositioning cursor after printing an ambiguous-width char.
-    grid->row = -1;
+    char buf[MAX_SCHAR_SIZE];
+    schar_get(buf, cell->data);
+    int c = utf_ptr2char(buf);
+    bool is_doublewidth = (i < count - 1) && (cell + 1)->data == NUL;
+    bool is_ambiwidth = utf_ambiguous_width(buf);
+    if (is_doublewidth && (is_ambiwidth || utf_char2cells(c) == 1)) {
+      // If the server used setcellwidths() to treat a single-width char as double-width,
+      // it needs to be treated like an ambiguous-width char.
+      is_ambiwidth = true;
+      // Clear the two screen cells.
+      // If the char is single-width in host terminal it won't change the second cell.
+      update_attrs(tui, cell->attr);
+      print_spaces(tui, 2);
+      cursor_goto(tui, row, col + i);
+    }
+
+    print_cell(tui, buf, cell->attr);
+
+    if (is_ambiwidth) {
+      // Force repositioning cursor after printing an ambiguous-width char.
+      grid->row = -1;
+    }
   }
 }
 
@@ -1497,10 +1508,7 @@ void tui_flush(TUIData *tui)
         }
       }
 
-      UGRID_FOREACH_CELL(grid, row, r.left, clear_col, {
-        print_cell_at_pos(tui, row, curcol, cell,
-                          curcol < clear_col - 1 && (cell + 1)->data == NUL);
-      });
+      print_cells_at_row(tui, grid->cells[row], row, r.left, clear_col - r.left);
       if (clear_col < r.right) {
         clear_region(tui, row, row + 1, clear_col, r.right, clear_attr);
       }
@@ -1669,10 +1677,7 @@ void tui_raw_line(TUIData *tui, Integer g, Integer linerow, Integer startcol, In
     assert((size_t)attrs[c - startcol] < kv_size(tui->attrs));
     grid->cells[linerow][c].attr = attrs[c - startcol];
   }
-  UGRID_FOREACH_CELL(grid, (int)linerow, (int)startcol, (int)endcol, {
-    print_cell_at_pos(tui, (int)linerow, curcol, cell,
-                      curcol < endcol - 1 && (cell + 1)->data == NUL);
-  });
+  print_cells_at_row(tui, grid->cells[linerow], linerow, startcol, endcol - startcol);
 
   if (clearcol > endcol) {
     ugrid_clear_chunk(grid, (int)linerow, (int)endcol, (int)clearcol,
@@ -1689,8 +1694,7 @@ void tui_raw_line(TUIData *tui, Integer g, Integer linerow, Integer startcol, In
     if (endcol != grid->width) {
       // Print the last char of the row, if we haven't already done so.
       int size = grid->cells[linerow][grid->width - 1].data == NUL ? 2 : 1;
-      print_cell_at_pos(tui, (int)linerow, grid->width - size,
-                        &grid->cells[linerow][grid->width - size], size == 2);
+      print_cells_at_row(tui, grid->cells[linerow], linerow, grid->width - size, size);
     }
 
     // Wrap the cursor over to the next line. The next line will be
